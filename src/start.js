@@ -14,6 +14,7 @@ const {proxyEnsProviderWs} = require('./ens-provider-ws')
 const {proxyIpfsGateway, rewriteIpfsGatewaySubdomainsHost} = require('./ipfs-gateway')
 const {proxyPreviewer} = require('./previewer')
 const {proxyPubsubProvider} = require('./pubsub-provider')
+const {isHttpRoutingProvider, handleHttpRoutingProvider} = require('./http-routing-provider')
 const {proxyCerbot} = require('./certbot')
 
 // logs
@@ -140,6 +141,11 @@ const startServer = (port) => {
     // .eth provider
     if ((req.method === 'POST' || req.method === 'OPTIONS') && req.url === '/') {
       return proxyEnsProvider(proxy, req, res)
+    }
+
+    // delegated HTTP routing provider endpoints
+    if (isHttpRoutingProvider(req)) {
+      return handleHttpRoutingProvider(req, res)
     }
 
     // previewer endpoints

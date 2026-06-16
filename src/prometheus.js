@@ -37,6 +37,8 @@ const observeMetrics = (req, res) => {
       labels.path = '/api/v0/pubsub/sub'
     } else if (req.url.startsWith('/api/v0/pubsub/pub')) {
       labels.path = '/api/v0/pubsub/pub'
+    } else if (req.url.startsWith('/routing/v1/providers')) {
+      labels.path = '/routing/v1/providers'
     }
     timer()
   })

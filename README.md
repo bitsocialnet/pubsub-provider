@@ -6,11 +6,12 @@ Modern Bitsocial apps such as 5chan use pure p2p in the browser by default. This
 
 ## What It Runs
 
-- a public HTTP proxy for pubsub, gateway, and name-provider routes
+- a public HTTP proxy for pubsub, gateway, name-provider, and delegated routing routes
 - a bundled Kubo node with pubsub enabled
+- a delegated HTTP routing provider at `/routing/v1/providers`
 - optional ENS/SNS proxy helpers when chain RPC environment variables are configured
 
-It does not run the Bitsocial tracker. Keep running the tracker separately for peer discovery.
+It includes the delegated HTTP routing compatibility endpoint that old provider clients used for provider lookup/provide requests. You can still run a dedicated tracker separately if you want that role split out.
 
 ## Ports
 
@@ -54,6 +55,7 @@ PUBSUB_PROVIDER_PORTS=8000
 KUBO_RPC_URL=http://127.0.0.1:5001/api/v0
 IPFS_GATEWAY_URL=http://127.0.0.1:8080
 HTTP_ROUTER_URLS=https://example-router.invalid
+PUBSUB_PROVIDER_ROUTING_STORE_PATH=
 BASIC_AUTH_USERNAME=
 BASIC_AUTH_PASSWORD=
 IPFS_GATEWAY_USE_SUBDOMAINS=false
