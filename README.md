@@ -31,7 +31,14 @@ The published Docker image includes the Kubo binary, so normal Docker users do n
 ```sh
 git clone https://github.com/bitsocialnet/pubsub-provider.git
 cd pubsub-provider
+docker compose pull
 docker compose up -d
+```
+
+The default Compose file runs the pinned published image. To build from local source instead:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build -d
 ```
 
 Check logs:
@@ -76,6 +83,27 @@ PUBSUB_PROVIDER_KUBO_DOWNLOAD_TIMEOUT_MS=600000
 ```
 
 If you also run `bitsocial-seeder`, keep this provider on swarm port `4002` or another non-`4001` port.
+
+## Upgrading
+
+If you previously ran `latest`, force Compose to recreate the container from the pinned image:
+
+```sh
+git pull
+docker compose down
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+Verify the fixed image is running:
+
+```sh
+docker inspect pubsub-provider --format 'image={{.Image}} restarts={{.RestartCount}}'
+docker exec pubsub-provider /app/bin/ipfs version
+curl http://127.0.0.1/commit-hash
+```
+
+The logs should not contain `downloading ipfs`. If they do, the container is still running an old local image or an old checkout.
 
 ## Local Development
 

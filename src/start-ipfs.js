@@ -68,6 +68,8 @@ const httpRouterUrls = [
   if (!fs.pathExistsSync(ipfsBinaryPath)) {
     console.log('downloading ipfs... might take a few minutes')
     await downloadIpfs()
+  } else {
+    console.log(`using Kubo binary at ${ipfsBinaryPath}`)
   }
   const versionMessage = execSync(`${ipfsBinaryPath} version`, {env, encoding: 'utf-8'}).trim()
   if (!versionMessage.includes(ipfsClientVersion)) {

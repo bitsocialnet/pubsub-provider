@@ -1,8 +1,6 @@
 services:
   pubsub-provider:
-    image: ghcr.io/bitsocialnet/pubsub-provider:latest
-    build:
-      context: .
+    image: ${PUBSUB_PROVIDER_IMAGE:-ghcr.io/bitsocialnet/pubsub-provider:0.1.2}
     container_name: pubsub-provider
     restart: unless-stopped
     environment:

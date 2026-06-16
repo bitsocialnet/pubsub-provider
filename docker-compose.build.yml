@@ -1,0 +1,5 @@
+services:
+  pubsub-provider:
+    image: ${PUBSUB_PROVIDER_IMAGE:-pubsub-provider:local}
+    build:
+      context: .
