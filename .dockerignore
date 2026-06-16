@@ -1,0 +1,7 @@
+.git
+.ipfs
+bin/ipfs
+node_modules
+npm-debug.log
+Dockerfile
+docker-compose.yml

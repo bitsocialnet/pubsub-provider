@@ -1,0 +1,252 @@
+const http = require('http')
+const httpProxy = require('http-proxy')
+require('dotenv').config()
+const Debug = require('debug')
+const debug = Debug('pubsub-provider:sns-provider')
+const streamify = require('stream-array')
+const {RateLimiterMemory} = require('rate-limiter-flexible')
+const rateLimiter = new RateLimiterMemory({points: 10, duration: 60 * 60, blockDuration: 60 * 60})
+const isRateLimited = async (ip) => ((await rateLimiter.get(ip))?.remainingPoints ?? 1) <= 0
+
+const allowedMethods = new Set([
+  // sns
+  'getAccountInfo',
+])
+
+const cacheMaxAge = 1000 * 60 * 5
+
+const chainProviderUrl = process.env.SOL_PROVIDER_URL
+let chainProvider
+try {
+  chainProvider = new URL(chainProviderUrl)
+}
+catch (e) {}
+
+const noChainProviderUrlErrorMessage = `env variable 'SOL_PROVIDER_URL' not defined`
+
+let cache
+import('quick-lru').then(QuickLRU => {
+  cache = new QuickLRU.default({maxSize: 10000, maxAge: cacheMaxAge})
+})
+
+const replaceId = (jsonStr, id) => {
+  try {
+    const parsed = JSON.parse(jsonStr)
+    parsed.id = id
+    return JSON.stringify(parsed)
+  } catch (e) {
+    return jsonStr
+  }
+}
+
+// start proxy
+const proxy = httpProxy.createProxyServer({selfHandleResponse: true})
+
+// rewrite the request
+proxy.on('proxyReq', function(proxyReq, req, res, options) {
+  // remove headers that could potentially cause an ipfs 403 error
+  proxyReq.removeHeader('CF-IPCountry')
+  proxyReq.removeHeader('X-Forwarded-For')
+  proxyReq.removeHeader('CF-RAY')
+  proxyReq.removeHeader('X-Forwarded-Proto')
+  proxyReq.removeHeader('CF-Visitor')
+  proxyReq.removeHeader('sec-ch-ua')
+  proxyReq.removeHeader('sec-ch-ua-mobile')
+  proxyReq.removeHeader('user-agent')
+  proxyReq.removeHeader('origin')
+  proxyReq.removeHeader('sec-fetch-site')
+  proxyReq.removeHeader('sec-fetch-mode')
+  proxyReq.removeHeader('sec-fetch-dest')
+  proxyReq.removeHeader('referer')
+  proxyReq.removeHeader('CF-Connecting-IP')
+  proxyReq.removeHeader('CDN-Loop')
+
+  // easier caching logic without encoding
+  proxyReq.removeHeader('Accept-Encoding')
+
+  // fix bug where path name has extra / added after
+  proxyReq.path = chainProvider.pathname + chainProvider.search
+
+  // fix https issue where json gets sent twice
+  proxyReq.setHeader('Connection', 'close')
+})
+proxy.on('error', (e, req, res) => {
+  console.error(e)
+  // if not ended, will hang forever
+  res.statusCode = 502
+  res.setHeader('Content-Type', 'text/plain')
+  res.end(`502 Bad Gateway: ${e.message}`)
+})
+proxy.on('proxyRes', async (proxyRes, req, res) => {
+  // cache response
+  if (proxyRes.statusCode === 200) {
+    let resBody
+    try {
+      const chunks = await getBodyChunks(proxyRes)
+      resBody = chunks.join('')
+
+      // rate limit and dont cache non-sns requests
+      if (!resBody.includes(`"owner":"names`)) {
+        debug(req.method, req.url, req.headers, req.jsonBody, resBody, 'will rate limit')
+        await rateLimiter.tryConsume(req.headers['x-forwarded-for'])
+        res.statusCode = 404
+        res.end()
+        return
+      }
+
+      if (!resBody.includes('"error":')) { // shouldn't happen with res.statusCode === 200, but just in case
+        const reqBody = replaceId(req.jsonBody, '') // remove id field or caching wont work
+        cache?.set(reqBody, resBody)
+      }
+    }
+    catch (e) {}
+    res.writeHead(proxyRes.statusCode, proxyRes.headers)
+    res.end(resBody || 'on proxyRes error')
+    return
+  }
+
+  res.writeHead(proxyRes.statusCode, proxyRes.headers)
+  proxyRes.pipe(res)
+})
+proxy.on('upgrade', (req, socket, head) => {
+  // proxy.ws(req, socket, head)
+  debug('ws upgrade')
+})
+
+// start server
+const startServer = (port) => {
+  const server = http.createServer()
+
+  // never timeout the keep alive connection
+  server.keepAliveTimeout = 0
+
+  server.on('request', async (req, res) => {
+    // unrelated endpoints
+    if (req.url === '/service-worker.js' || req.url === '/manifest.json' || req.url === '/favicon.ico') {
+      res.end()
+      return
+    }
+
+    if (!chainProviderUrl) {
+      debug(req.method, req.url, req.headers, noChainProviderUrlErrorMessage)
+      res.statusCode = 500
+      res.end(noChainProviderUrlErrorMessage)
+      return
+    }
+
+    // fix error 'has been blocked by CORS policy'
+    res.setHeader('Access-Control-Allow-Origin', '*')
+
+    // fix preflight cors
+    if (req.method === 'OPTIONS') {
+      debug(req.method, req.url, req.headers)
+      res.writeHead(204, {
+        'access-control-allow-origin': '*',
+        'access-control-allow-headers': '*',
+        'access-control-allow-methods': 'GET, POST, HEAD, OPTIONS',
+        'access-control-max-age': '86400', // cache for 24h, browsers don't allow large values
+        'content-length': '0',
+      })
+      res.end()
+      return
+    }
+
+    let body
+    let bodyChunks = []
+    let jsonBody
+    try {
+      bodyChunks = await getBodyChunks(req)
+      jsonBody = bodyChunks.join('')
+      body = JSON.parse(jsonBody)
+    }
+    catch (e) {
+      debug(req.method, req.url, req.headers, 'failed parsing body')
+      res.end()
+      return
+    }
+
+    // handle getTokenLargestAccounts always the same
+    if (body.method === 'getTokenLargestAccounts') {
+      res.setHeader('Content-Type', 'application/json')
+      res.statusCode = 200
+      res.end(`{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid param: could not find mint"},"id":"${body.id}"}`)
+      return
+    }
+
+    if (!allowedMethods.has(body.method)) {
+      debug(req.method, req.url, req.headers, body, 'forbidden')
+      res.statusCode = 404
+      res.end()
+      return
+    }
+
+    // handle cache
+    const cached = cache?.get(replaceId(jsonBody, '')) // remove id field or caching wont work)
+
+    // rate limit non-cached non-sns requests
+    if (!cached && await isRateLimited(req.headers['x-forwarded-for'])) {
+      debug(req.method, req.url, req.headers, body, 'rate limited')
+      res.statusCode = 404
+      res.end()
+      return
+    }
+
+    debug(req.method, req.url, req.headers, body, `cached: ${!!cached}`)
+    if (cached) {
+      res.setHeader('Content-Type', 'application/json')
+      res.statusCode = 200
+      res.end(replaceId(cached, body.id)) // add back original id field
+      return
+    }
+    req.jsonBody = jsonBody
+
+    // expires after 5 minutes (300 seconds), must revalidate if expired
+    // SNS must not be cached for too long otherwise user can't see his changes reflected
+    res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate')
+
+    proxy.web(req, res, {
+      target: chainProviderUrl,
+      // must re-stream the post body when you read it with getBodyChunks(req)
+      buffer: streamify(bodyChunks),
+      // the proxy changes the host to localhost without changeOrigin
+      changeOrigin: true,
+    })
+  })
+  server.on('error', console.error)
+
+  server.listen(port)
+  console.log(`sns proxy server listening on port ${port}`)
+}
+const port = 29554
+startServer(port)
+
+const getBodyChunks = (req) => new Promise((resolve, reject) => {
+  let body = ''
+  const chunks = []
+  req.on('data', (data) => {
+    body += data
+    chunks.push(data)
+    // Too much POST data, kill the connection!
+    // 1e6 === 1 * Math.pow(10, 6) === 1 * 1000000 ~~~ 1MB
+    if (body.length > 1e6) {
+      req.connection.destroy()
+      return reject(Error('body too big'))
+    }
+  })
+  req.on('end', () => {
+    resolve(chunks)
+  })
+  setTimeout(resolve, 5000)
+})
+
+// use this function in the proxy script
+const proxySnsProvider = (proxy, req, res) => {
+  proxy.web(req, res, {target: `http://127.0.0.1:${port}`})
+}
+
+const isSnsProvider = (req) => 
+  req.url === '/' 
+  && (req.method === 'POST' || req.method === 'OPTIONS')
+  && (req.headers['access-control-request-headers']?.includes('solana-client') || req.headers['solana-client'])
+
+module.exports = {proxySnsProvider, isSnsProvider}

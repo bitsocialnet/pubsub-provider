@@ -1,0 +1,61 @@
+{
+  "name": "@bitsocial/pubsub-provider",
+  "version": "0.1.0",
+  "description": "Run a Bitsocial pubsub fallback provider with a bundled Kubo node.",
+  "main": "./src/start.js",
+  "keywords": [
+    "bitsocial",
+    "ipfs",
+    "pubsub",
+    "provider",
+    "kubo"
+  ],
+  "author": "Bitsocial Forge",
+  "scripts": {
+    "start": "node src/start",
+    "docker:start": "docker compose up --build",
+    "test": "mocha test/**/*.test.js",
+    "test:browser": "karma start config/karma.conf.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bitsocialnet/pubsub-provider.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "check-disk-space": "3.4.0",
+    "debug": "4.4.3",
+    "decompress": "4.2.1",
+    "dotenv": "17.4.2",
+    "fs-extra": "11.3.5",
+    "http-proxy": "1.18.1",
+    "progress": "2.0.3",
+    "prom-client": "15.1.3",
+    "quick-lru": "6.1.1",
+    "rate-limiter-flexible": "7.2.0",
+    "stream-array": "1.1.2",
+    "tcp-port-used": "1.0.3",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "buffer": "6.0.3",
+    "chai": "4.3.6",
+    "https-proxy-agent": "5.0.1",
+    "kubo-rpc-client": "5.4.1",
+    "karma": "6.4.4",
+    "karma-chai": "0.1.0",
+    "karma-chrome-launcher": "3.2.0",
+    "karma-firefox-launcher": "2.1.3",
+    "karma-mocha": "2.0.1",
+    "karma-spec-reporter": "0.0.36",
+    "karma-webpack": "5.0.1",
+    "mocha": "11.7.6",
+    "uint8arrays": "3.0.0"
+  }
+}

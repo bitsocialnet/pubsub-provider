@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+
+# go to current folder
+cd "$(dirname "$0")"
+cd ..
+
+# add env vars
+if [ -f .env ]; then
+  export $(echo $(cat .env | sed 's/#.*//g'| xargs) | envsubst)
+fi
+
+# parse args
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --domain)
+      DOMAIN="$2"
+      shift 2
+      ;;
+    --email)
+      CERT_EMAIL="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown argument: $1"
+      exit 1
+      ;;
+  esac
+done
+
+# validate args
+if [ -z "$DOMAIN" ] || [ -z "$CERT_EMAIL" ]; then
+  echo "Usage: $0 --domain yourdomain.com --email you@example.com"
+  exit 1
+fi
+
+# init certbot
+mkdir -p letsencrypt
+mkdir -p certbot-www
+
+docker run --rm \
+  -v $(pwd)/letsencrypt:/etc/letsencrypt \
+  -v $(pwd)/certbot-www:/var/www/certbot \
+  certbot/certbot certonly \
+  --webroot \
+  --webroot-path /var/www/certbot \
+  -d $DOMAIN \
+  --agree-tos \
+  --non-interactive \
+  --email $CERT_EMAIL \
+  --preferred-challenges http \
+  --server https://acme-v02.api.letsencrypt.org/directory
+
+docker rm -f pubsub-provider-certbot-renew 2>/dev/null
+
+# start certbot renewal loop
+docker run \
+  --detach \
+  -v $(pwd)/letsencrypt:/etc/letsencrypt \
+  -v $(pwd)/certbot-www:/var/www/certbot \
+  --name pubsub-provider-certbot-renew \
+  --restart always \
+  --log-opt max-size=10m \
+  --log-opt max-file=5 \
+  --entrypoint "" \
+  certbot/certbot sh -c '
+    while :; do
+      echo "checking for certificate renewal..."
+      certbot renew --webroot --webroot-path /var/www/certbot
+      echo "renewal check completed on $(date), sleeping for 1 day..."
+      sleep 86400
+    done'
+
+docker logs --follow pubsub-provider-certbot-renew &
+
+# create nginx config file
+mkdir -p nginx
+cat > nginx/nginx.conf <<EOF
+user nginx;
+
+# 1 worker per cpu, 1024 connections per worker, same as default, maybe change later
+worker_processes auto;
+events {
+    worker_connections 1024;
+}
+
+http {
+    # remove nginx header
+    server_tokens off;
+    add_header Server "";
+
+    # logging
+    access_log /var/log/nginx/access.log;
+    error_log /var/log/nginx/error.log;
+
+    # proxy https with http2 and http3 to port 80
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+
+        server_name $DOMAIN;
+
+        ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers off;
+
+        # enable http3 / quic
+        add_header Alt-Svc 'h3-23=":443"';
+
+        location / {
+            proxy_pass http://127.0.0.1:80;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+
+            # cache
+            # don't cache because can only respect max-age with nginx pro subscription
+            # also doesn't work with ipns if-none-match header
+
+            # fix pubsub http2 issue
+            proxy_buffering off;
+        }
+    }
+}
+EOF
+
+docker rm -f pubsub-provider-nginx-https-proxy 2>/dev/null
+
+# start nginx proxy https to http port 80 (and serve webroot)
+# -p 443:443/tcp -p 443:443/udp needed for http3 quic
+docker run \
+  --detach \
+  -v $(pwd)/nginx:/etc/nginx \
+  -v $(pwd)/letsencrypt:/etc/letsencrypt \
+  -v $(pwd)/certbot-www:/var/www/certbot \
+  --network host \
+  --name pubsub-provider-nginx-https-proxy \
+  --restart always \
+  --log-opt max-size=10m \
+  --log-opt max-file=5 \
+  --health-cmd='
+    # reload nginx when the ssl cert changes
+    CERT_DIR=/etc/letsencrypt
+    STATE_FILE=/tmp/pubsub-provider-nginx-https-proxy-cert.checksum
+    [ -d "$CERT_DIR/live" ] || exit 0
+    checksum() { find "$CERT_DIR" -type f -o -type l 2>/dev/null -exec stat -c "%n %s %Y" {} \; | sort | sha256sum | awk "{print \$1}"; }
+    NEW_SUM="$(checksum)"
+    OLD_SUM="$(cat "$STATE_FILE" 2>/dev/null || echo)"
+    [ "$NEW_SUM" != "$OLD_SUM" ] && nginx -s reload && echo "$NEW_SUM" > "$STATE_FILE"
+    exit 0
+  ' \
+  --health-interval=30s \
+  --health-timeout=5s \
+  --health-retries=1 \
+  nginx:1.27.1
+
+docker logs --follow pubsub-provider-nginx-https-proxy
