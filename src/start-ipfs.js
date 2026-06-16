@@ -1,4 +1,4 @@
-require('dotenv').config()
+require('dotenv').config({quiet: true})
 const config = require('./config')
 const envHttpRouterUrls = process.env.HTTP_ROUTER_URLS ? process.env.HTTP_ROUTER_URLS.split(',').map(url => url.trim()) : []
 const Debug = require('debug')
@@ -30,7 +30,17 @@ if (architecture === 'ia32') {
   throw Error(`ipfs doesn't support architecture '${architecture}'`)
 }
 const ipfsClientVersion = '0.34.1'
-const ipfsClientLinuxUrl = `https://dist.ipfs.io/kubo/v${ipfsClientVersion}/kubo_v${ipfsClientVersion}_linux-${ipfsClientArchitecture}.tar.gz`
+const ipfsClientFileName = `kubo_v${ipfsClientVersion}_linux-${ipfsClientArchitecture}.tar.gz`
+const kuboDownloadBaseUrls = [
+  'https://dist.ipfs.tech/kubo',
+  'https://dist.ipfs.io/kubo',
+  'https://github.com/ipfs/kubo/releases/download'
+]
+const configuredKuboDownloadUrls = (process.env.PUBSUB_PROVIDER_KUBO_DOWNLOAD_URLS || '').split(',').map(url => url.trim()).filter(Boolean)
+const ipfsClientLinuxUrls = (configuredKuboDownloadUrls.length ? configuredKuboDownloadUrls : kuboDownloadBaseUrls)
+  .map(getKuboDownloadUrl)
+const kuboDownloadAttempts = parsePositiveInteger(process.env.PUBSUB_PROVIDER_KUBO_DOWNLOAD_ATTEMPTS, 5)
+const kuboDownloadTimeoutMs = parsePositiveInteger(process.env.PUBSUB_PROVIDER_KUBO_DOWNLOAD_TIMEOUT_MS, 10 * 60 * 1000)
 const ipfsApiPort = config.ipfsApiPort
 const ipfsGatewayPort = config.ipfsGatewayPort
 const swarmAddresses = [
@@ -95,7 +105,26 @@ const httpRouterUrls = [
     }, 1000)
   }
   startIpfsAutoRestart()
-})()
+})().catch((e) => {
+  console.error('failed to start bundled Kubo', e)
+  process.exit(1)
+})
+
+function getKuboDownloadUrl(urlOrBaseUrl) {
+  if (urlOrBaseUrl.includes(ipfsClientFileName)) {
+    return urlOrBaseUrl
+  }
+  return `${urlOrBaseUrl.replace(/\/$/, '')}/v${ipfsClientVersion}/${ipfsClientFileName}`
+}
+
+function parsePositiveInteger(value, defaultValue) {
+  const parsed = Number.parseInt(value, 10)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : defaultValue
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 async function initIpfs() {
   // init ipfs binary
@@ -226,62 +255,110 @@ const startIpfs = () => new Promise((resolve, reject) => {
 })
 
 async function downloadIpfs() {
-  const downloadWithProgress = (url) =>
-    new Promise((resolve) => {
+  const downloadWithProgress = (url, redirectCount = 0) =>
+    new Promise((resolve, reject) => {
       const split = url.split('/')
       const fileName = split[split.length - 1]
       const chunks = []
-      const req = https.request(url)
+      const req = https.request(url, {
+        headers: {
+          'User-Agent': `bitsocial-pubsub-provider/${require('../package.json').version}`
+        }
+      })
       req.on('response', (res) => {
         // handle redirects
-        if (res.statusCode == 301 || res.statusCode === 302) {
-          resolve(downloadWithProgress(res.headers.location))
+        if (res.statusCode >= 300 && res.statusCode < 400) {
+          if (!res.headers.location) {
+            reject(Error(`download redirected without a location header from ${url}`))
+            return
+          }
+          if (redirectCount >= 5) {
+            reject(Error(`too many redirects while downloading ${url}`))
+            return
+          }
+          res.resume()
+          const redirectUrl = new URL(res.headers.location, url).toString()
+          resolve(downloadWithProgress(redirectUrl, redirectCount + 1))
+          return
+        }
+
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume()
+          reject(Error(`download failed with HTTP ${res.statusCode} from ${url}`))
           return
         }
 
         const len = parseInt(res.headers['content-length'], 10)
         console.log()
-        const bar = new ProgressBar(`  ${fileName} [:bar] :rate/bps :percent :etas`, {
-          complete: '=',
-          incomplete: ' ',
-          width: 20,
-          total: len,
-        })
+        const bar = Number.isFinite(len) && len > 0
+          ? new ProgressBar(`  ${fileName} [:bar] :rate/bps :percent :etas`, {
+            complete: '=',
+            incomplete: ' ',
+            width: 20,
+            total: len,
+          })
+          : null
         res.on('data', (chunk) => {
           chunks.push(chunk)
-          bar.tick(chunk.length)
+          if (bar) {
+            bar.tick(chunk.length)
+          }
         })
+        res.on('error', reject)
         res.on('end', () => {
           console.log('\n')
           resolve(Buffer.concat(chunks))
         })
       })
+      req.on('error', reject)
+      req.setTimeout(kuboDownloadTimeoutMs, () => {
+        req.destroy(Error(`download timed out after ${kuboDownloadTimeoutMs}ms from ${url}`))
+      })
       req.end()
     })
 
+  const downloadFromMirrors = async (urls) => {
+    let lastError
+    for (let attempt = 1; attempt <= kuboDownloadAttempts; attempt++) {
+      for (const url of urls) {
+        try {
+          console.log(`downloading Kubo from ${url} (attempt ${attempt}/${kuboDownloadAttempts})`)
+          return await downloadWithProgress(url)
+        } catch (e) {
+          lastError = e
+          console.error(`failed downloading Kubo from ${url}: ${e.message}`)
+        }
+      }
+      if (attempt < kuboDownloadAttempts) {
+        const delayMs = Math.min(30 * 1000, 1000 * 2 ** (attempt - 1))
+        console.log(`retrying Kubo download in ${Math.round(delayMs / 1000)}s`)
+        await sleep(delayMs)
+      }
+    }
+    throw lastError || Error('failed downloading Kubo')
+  }
+
   // official kubo downloads need to be extracted
-  const downloadAndExtract = async (url, destinationPath) => {
+  const downloadAndExtract = async (urls, destinationPath) => {
     const destinationFolderPath = path.dirname(destinationPath)
     const binName = path.basename(destinationPath)
     const binPath = destinationPath
     if (fs.pathExistsSync(binPath)) {
       return
     }
-    const split = url.split('/')
-    const fileName = split[split.length - 1]
-    const dowloadPath = path.join(destinationFolderPath, fileName)
-    const file = await downloadWithProgress(url)
+    const downloadPath = path.join(destinationFolderPath, ipfsClientFileName)
+    const file = await downloadFromMirrors(urls)
     fs.ensureDirSync(destinationFolderPath)
-    await fs.writeFile(dowloadPath, file)
-    await decompress(dowloadPath, destinationFolderPath)
+    await fs.writeFile(downloadPath, file)
+    await decompress(downloadPath, destinationFolderPath)
     const extractedPath = path.join(destinationFolderPath, 'kubo')
     const extractedBinPath = path.join(extractedPath, binName)
     fs.moveSync(extractedBinPath, binPath)
     fs.removeSync(extractedPath)
-    fs.removeSync(dowloadPath)
+    fs.removeSync(downloadPath)
   }
 
-  await downloadAndExtract(ipfsClientLinuxUrl, ipfsBinaryPath)
+  await downloadAndExtract(ipfsClientLinuxUrls, ipfsBinaryPath)
 }
 
 // garbage collect ipfs if disk space is low every 1h

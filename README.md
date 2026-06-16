@@ -26,6 +26,8 @@ The defaults are chosen so this can run next to `bitsocial-seeder` on the same h
 
 ## Quick Start
 
+The published Docker image includes the Kubo binary, so normal Docker users do not need to download Kubo during container startup.
+
 ```sh
 git clone https://github.com/bitsocialnet/pubsub-provider.git
 cd pubsub-provider
@@ -63,6 +65,14 @@ SHUTDOWN_KEY=
 ETH_PROVIDER_URL=
 ETH_PROVIDER_URL_WS=
 SOL_PROVIDER_URL=
+```
+
+Source/local runs download Kubo automatically when `bin/ipfs` is missing. If your host has unreliable DNS or blocks the default download domains, you can provide comma-separated full URLs or base URLs:
+
+```sh
+PUBSUB_PROVIDER_KUBO_DOWNLOAD_URLS=https://dist.ipfs.tech/kubo,https://github.com/ipfs/kubo/releases/download
+PUBSUB_PROVIDER_KUBO_DOWNLOAD_ATTEMPTS=5
+PUBSUB_PROVIDER_KUBO_DOWNLOAD_TIMEOUT_MS=600000
 ```
 
 If you also run `bitsocial-seeder`, keep this provider on swarm port `4002` or another non-`4001` port.

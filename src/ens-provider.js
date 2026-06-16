@@ -1,6 +1,6 @@
 const http = require('http')
 const httpProxy = require('http-proxy')
-require('dotenv').config()
+require('dotenv').config({quiet: true})
 const Debug = require('debug')
 const debug = Debug('pubsub-provider:ens-provider')
 const streamify = require('stream-array')

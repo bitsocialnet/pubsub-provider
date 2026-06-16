@@ -1,6 +1,6 @@
 {
   "name": "@bitsocial/pubsub-provider",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run a Bitsocial pubsub fallback provider with a bundled Kubo node.",
   "main": "./src/start.js",
   "keywords": [

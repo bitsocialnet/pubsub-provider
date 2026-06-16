@@ -1,6 +1,6 @@
 // you can add "CHROME_BIN=/usr/bin/chromium" to .env file
 // to not have to type it every time
-require('dotenv').config()
+require('dotenv').config({quiet: true})
 
 // same as .mocharc.js
 const mochaConfig = {
