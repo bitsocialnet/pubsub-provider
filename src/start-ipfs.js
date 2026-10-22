@@ -11,7 +11,7 @@ const env = {IPFS_PATH: ipfsDataPath}
 const fs = require('fs-extra')
 const https = require('https')
 const ProgressBar = require('progress')
-const decompress = require('decompress')
+const decompress = require('@xhmikosr/decompress').default
 const ipfsGatewayUseSubdomains = process.env.IPFS_GATEWAY_USE_SUBDOMAINS === 'true' || process.argv.includes('--ipfs-gateway-use-subdomains')
 const tcpPortUsed = require('tcp-port-used')
 const ps = require('process')
