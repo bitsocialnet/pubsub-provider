@@ -10,18 +10,25 @@ const port = 29425
 
 const chainProviderUrl = process.env.ETH_PROVIDER_URL_WS
 
+const chainProviderNotConnectedError = {
+  code: -32603,
+  message: 'chain provider websocket not connected, try again later'
+}
+
 let cache
 import('quick-lru').then(QuickLRU => {
   cache = new QuickLRU.default({maxSize: 10000, maxAge: cacheMaxAge})
 })
 
-const startWebSockerServer = () => {
+const startWebSockerServer = ({chainProviderUrl, port}) => {
   if (!chainProviderUrl) {
     return
   }
 
   const onChainProviderMessage = {}
   let chainProviderSocket
+  let reconnectTimeout
+  let closed = false
   const createChainProviderSocket = () => {
     // start chain provider websocket connection
     chainProviderSocket = new WebSocket(chainProviderUrl)
@@ -29,8 +36,15 @@ const startWebSockerServer = () => {
       debug('connected to chain provider websocket')
     })
     chainProviderSocket.on('close', () => {
+      // the chain provider won't answer the requests sent on this socket anymore, fail them now
+      for (const id in onChainProviderMessage) {
+        onChainProviderMessage[id]({jsonrpc: '2.0', error: chainProviderNotConnectedError})
+      }
+      if (closed) {
+        return
+      }
       debug('disconnected from chain provider websocket, reconnecting in 5s...')
-      setTimeout(() => {
+      reconnectTimeout = setTimeout(() => {
         createChainProviderSocket()
       }, 5000)
     })
@@ -73,7 +87,8 @@ const startWebSockerServer = () => {
   })
   console.log(`ens websocket proxy server listening on port ${port}`)
 
-  let nextJsonRpcId = 0
+  // start at 1, chain provider replies are matched by truthy id
+  let nextJsonRpcId = 1
   server.on('connection', (clientSocket, req) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress
 
@@ -89,9 +104,11 @@ const startWebSockerServer = () => {
         return
       }
 
-      if (!allowedMethods.has(jsonMessage.method) || !allowedAddresses.has(jsonMessage.params[0]?.to?.toLowerCase?.())) {
+      // a `to` that isn't a string is treated as missing, like before, without calling a toLowerCase it doesn't have
+      const to = jsonMessage?.params?.[0]?.to
+      if (!allowedMethods.has(jsonMessage?.method) || !allowedAddresses.has(typeof to === 'string' ? to.toLowerCase() : undefined)) {
         debug('received from websocket client', jsonMessage, 'forbidden')
-        clientSocket.send(JSON.stringify({...bitsocialErrorMessage, id: jsonMessage.id}))
+        clientSocket.send(JSON.stringify({...bitsocialErrorMessage, id: jsonMessage?.id}))
         return
       }
 
@@ -103,8 +120,18 @@ const startWebSockerServer = () => {
         return
       }
 
+      // connecting, or closed and waiting to reconnect: send would throw or silently drop the request
+      if (chainProviderSocket.readyState !== WebSocket.OPEN) {
+        clientSocket.send(JSON.stringify({jsonrpc: '2.0', id: jsonMessage.id, error: chainProviderNotConnectedError}))
+        return
+      }
+
       const id = nextJsonRpcId++
       chainProviderSocket.send(JSON.stringify({...jsonMessage, id}))
+      // cleanup
+      const cleanupTimeout = setTimeout(() => {
+        delete onChainProviderMessage[id]
+      }, 1000 * 60 * 10)
       onChainProviderMessage[id] = (chainProviderMessageJson) => {
         // cache successful response
         if (!chainProviderMessageJson.error) {
@@ -115,12 +142,9 @@ const startWebSockerServer = () => {
         clientSocket.send(JSON.stringify({...chainProviderMessageJson, id: jsonMessage.id}))
 
         // cleanup
+        clearTimeout(cleanupTimeout)
         delete onChainProviderMessage[id]
       }
-      // cleanup
-      setTimeout(() => {
-        delete onChainProviderMessage[id]
-      }, 1000 * 60 * 10)
     })
     clientSocket.on('close', () => {
       debug('websocket client disconnected', ip)
@@ -129,8 +153,23 @@ const startWebSockerServer = () => {
       console.error('websocket client error:', error, ip)
     })
   })
+
+  return {
+    server,
+    getChainProviderSocketState,
+    // stop reconnecting and close all sockets
+    close: () => {
+      closed = true
+      clearTimeout(reconnectTimeout)
+      chainProviderSocket.terminate()
+      for (const clientSocket of server.clients) {
+        clientSocket.terminate()
+      }
+      server.close()
+    }
+  }
 }
-startWebSockerServer()
+startWebSockerServer({chainProviderUrl, port})
 
 // use this function in the proxy script
 const proxyEnsProviderWs = (req, socket, head) => {
@@ -153,4 +192,7 @@ const proxyEnsProviderWs = (req, socket, head) => {
   })
 }
 
-module.exports = {proxyEnsProviderWs}
+module.exports = {
+  proxyEnsProviderWs,
+  _private: {startWebSockerServer}
+}
