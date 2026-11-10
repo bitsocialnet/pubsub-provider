@@ -36,4 +36,64 @@ describe('ipfs daemon', () => {
       await stopIpfsDaemon(ipfsProcess)
     }
   })
+
+  it('does not leave health checks or exit hooks behind when the daemon keeps exiting at startup', async () => {
+    let healthCheckCount = 0
+    const healthChecks = [async () => {
+      healthCheckCount++
+    }]
+    const exitListenerCount = process.listenerCount('exit')
+
+    // like the 1s restart loop in start-ipfs.js
+    for (let i = 0; i < 3; i++) {
+      const error = await startFakeIpfsDaemon(['--exit-code=1'], {healthChecks, healthCheckIntervalMs: 10}).catch(e => e)
+      expect(error).to.be.an('error')
+    }
+    await sleep(100)
+
+    expect(healthCheckCount).to.equal(0)
+    expect(process.listenerCount('exit') - exitListenerCount).to.be.at.most(1)
+  })
+
+  it('kills a daemon that is not ready by the startup deadline so the restart loop can retry', async () => {
+    // e.g. a hung --migrate, health checks don't run before 'Daemon is ready'
+    const error = await startFakeIpfsDaemon(['--ready-delay-ms=100000'], {startupTimeoutMs: 100}).catch(e => e)
+    expect(error).to.be.an('error')
+  })
+
+  it('keeps a daemon that is ready before the startup deadline', async () => {
+    const ipfsProcess = await startFakeIpfsDaemon([], {startupTimeoutMs: 500})
+    try {
+      await sleep(600)
+      expect(hasExited(ipfsProcess)).to.equal(false)
+    }
+    finally {
+      await stopIpfsDaemon(ipfsProcess)
+    }
+  })
+
+  it('starts health checks when the daemon is ready and stops them when it exits', async () => {
+    let healthCheckCount = 0
+    const healthChecks = [async () => {
+      healthCheckCount++
+      return 'health check failed, killing ipfs...'
+    }]
+
+    // the daemon takes longer to start than the health check interval
+    const ipfsProcess = await startFakeIpfsDaemon(['--ready-delay-ms=200'], {healthChecks, healthCheckIntervalMs: 20})
+    try {
+      // the failing health check kills the daemon once it's ready
+      if (!hasExited(ipfsProcess)) {
+        await once(ipfsProcess, 'exit')
+      }
+      expect(healthCheckCount).to.be.at.least(1)
+
+      const healthCheckCountAfterExit = healthCheckCount
+      await sleep(100)
+      expect(healthCheckCount).to.equal(healthCheckCountAfterExit)
+    }
+    finally {
+      await stopIpfsDaemon(ipfsProcess)
+    }
+  })
 })
