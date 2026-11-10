@@ -130,4 +130,33 @@ describe('http routing provider', () => {
     expect(getRes.status).to.equal(200)
     expect(getRes.body.Providers[0].ID).to.equal(body.Providers[0].Payload.ID)
   })
+
+  it('keeps providers added while another request loads the store', async () => {
+    const cid = providerBody.Providers[0].Payload.Keys[0]
+    const otherCid = 'bafybeigvgzoolc3drupxhlevdp2ugqcrbcsqfmcek2zxiw5wctk3xjpjwy'
+    await fs.writeJson(storePath, {version: 1, cids: {}})
+
+    // cold process: a PUT and a GET arrive together, and the GET's store read finishes last
+    const {readJson} = fs
+    let readCount = 0
+    fs.readJson = async (...args) => {
+      const delayMs = readCount++ === 0 ? 0 : 50
+      const json = await readJson(...args)
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      return json
+    }
+    try {
+      await Promise.all([
+        _private.addProviders(JSON.parse(JSON.stringify(providerBody.Providers))),
+        _private.getProviders(otherCid)
+      ])
+    }
+    finally {
+      fs.readJson = readJson
+    }
+
+    const {providers} = await _private.getProviders(cid)
+    expect(providers.map(provider => provider.ID)).to.deep.equal([providerBody.Providers[0].Payload.ID])
+    expect(Object.keys((await fs.readJson(storePath)).cids)).to.have.length(1)
+  })
 })

@@ -17,6 +17,7 @@ const cidV1 = 1
 let cidModulePromise
 let multiaddrModulePromise
 let store
+let storePromise
 let writeQueue = Promise.resolve()
 
 const labels = {}
@@ -68,24 +69,28 @@ const createEmptyStore = () => ({
   cids: {}
 })
 
-const loadStore = async () => {
-  if (store) {
-    return store
-  }
-
+const readStore = async () => {
   try {
-    store = await fs.readJson(config.routingProviderStorePath)
-    if (!store || store.version !== 1 || !store.cids || typeof store.cids !== 'object') {
-      store = createEmptyStore()
+    const savedStore = await fs.readJson(config.routingProviderStorePath)
+    if (!savedStore || savedStore.version !== 1 || !savedStore.cids || typeof savedStore.cids !== 'object') {
+      return createEmptyStore()
     }
+    return savedStore
   } catch (e) {
     if (e.code !== 'ENOENT') {
       console.error(`failed reading routing provider store at ${config.routingProviderStorePath}`, e)
     }
-    store = createEmptyStore()
+    return createEmptyStore()
   }
+}
 
-  return store
+// memoize the load so concurrent first requests share one store object instead of replacing each other's
+const loadStore = async () => {
+  storePromise ||= readStore().then((loadedStore) => {
+    store = loadedStore
+    return store
+  })
+  return storePromise
 }
 
 const saveStore = async () => {
@@ -420,8 +425,10 @@ module.exports = {
     cleanAddrs,
     getProviders,
     normalizeCid,
+    // back to the state of a fresh process, the store is loaded from disk on next use
     resetStoreForTests: () => {
-      store = createEmptyStore()
+      store = undefined
+      storePromise = undefined
       writeQueue = Promise.resolve()
     }
   }
