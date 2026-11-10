@@ -42,11 +42,21 @@ const proxyPubsubProvider = (req, res) => {
     method: req.method,
     headers: reqHeaders
   }
+  // once headers are sent (or the client is gone) an error status can't be written anymore,
+  // reset the client stream instead so kubo.pubsub.subscribe onError is triggered
+  const sendError = (statusCode, message) => {
+    if (res.headersSent || res.destroyed) {
+      res.destroy()
+      return
+    }
+    res.writeHead(statusCode)
+    res.end(message)
+  }
+
   const proxyReq = httpRequest(requestOptions, (proxyRes) => {
     proxyRes.on('error', (e) => {
       debug('proxy res error:', e.message)
-      res.writeHead(502)
-      res.end(`Bad Gateway: ${e.message}`)
+      sendError(502, `Bad Gateway: ${e.message}`)
     })
 
     // fix error 'has been blocked by CORS policy'
@@ -59,8 +69,13 @@ const proxyPubsubProvider = (req, res) => {
   })
   proxyReq.on('error', (e) => {
     debug('proxy req error:', e.message)
-    res.writeHead(500)
-    res.end(`Internal Server Error: ${e.message}`)
+    sendError(500, `Internal Server Error: ${e.message}`)
+  })
+  // client disconnected before the response ended, close the kubo request so the subscription doesn't leak
+  res.on('close', () => {
+    if (!res.writableFinished) {
+      proxyReq.destroy()
+    }
   })
   req.pipe(proxyReq)
 }
