@@ -37,6 +37,8 @@ const fileCid = 'bafkreigur6gzxm3ykiol7ywou3iy3obruzs2q7boizj7oznznid34dzc3e'
 const notBitsocialCid = 'bafkreicafdegmgvhbsc4z4whwcz3wjdoeu3jpcuy2mfckqtq5dikjelzau'
 const dirCid = 'bafybeigvgzoolc3drupxhlevdp2ugqcrbcsqfmcek2zxiw5wctk3xjpjwy'
 const slowCid = 'QmSf6sTLvGrCzpLcqdRLy8xUmLUhgdyAQi1VaFy7Aa2VHW'
+// `cat` sends its headers and the start of the file, then stalls (e.g. a later block is missing)
+const stalledBodyCid = 'bafkreiaw5mlpsyhm6vxbmyrfzh3ptsadxf4kbtatwfeiieonbazc2wuzle'
 // ipns name that resolves to a directory, `cat` on the directory root never answers,
 // so a revalidation of the name (resolve + root cat) stays pending
 const ipnsDirName = 'k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8'
@@ -82,6 +84,11 @@ describe('ipfs gateway', () => {
       }
       if (url.pathname !== '/api/v0/cat' || arg === slowCid || arg === ipnsDirCid) {
         return // never answers
+      }
+      if (arg === stalledBodyCid) {
+        res.writeHead(200, {'content-type': 'text/plain'})
+        res.write('{"content":"hel')
+        return // never finishes the body
       }
       if (kuboFiles[arg]) {
         res.writeHead(200, {'content-type': 'text/plain'})
@@ -200,6 +207,13 @@ describe('ipfs gateway', () => {
   it('responds 504 when the content check times out', async () => {
     ipfsGateway._private.setFetchTimeoutForTests(100)
     const res = await get(`/ipfs/${slowCid}`)
+    expect(res.status).to.equal(504)
+    expect(gatewayRequests).to.deep.equal([])
+  })
+
+  it('responds 504 when the content check stalls after kubo sent its headers', async () => {
+    ipfsGateway._private.setFetchTimeoutForTests(100)
+    const res = await get(`/ipfs/${stalledBodyCid}`)
     expect(res.status).to.equal(504)
     expect(gatewayRequests).to.deep.equal([])
   })

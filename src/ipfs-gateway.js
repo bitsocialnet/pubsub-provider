@@ -136,8 +136,8 @@ const proxyIpfsGateway = async (proxy, req, res) => {
   try {
     const rootPath = ipnsName ? await resolveIpnsPath(ipnsName) : cid
     const ipfsPath = subPath ? `${rootPath}/${decodeURIComponent(subPath)}` : rootPath
-    fetched = await fetchWithTimeout(`${ipfsApiUrl}/cat?arg=${encodeURIComponent(ipfsPath)}&length=${maxSize}`, {method: 'POST'})
-    text = await fetched.text()
+    fetched = await fetchTextWithTimeout(`${ipfsApiUrl}/cat?arg=${encodeURIComponent(ipfsPath)}&length=${maxSize}`, {method: 'POST'})
+    text = fetched.text
     json = JSON.parse(text)
   }
   catch (e) {
@@ -196,8 +196,8 @@ const startCachingAndRevalidatingIpns = async (ipnsName) => {
   while (ipnsCachingAndRevalidatingUntil[ipnsName] > Date.now()) {
     try {
       const ipfsPath = await resolveIpnsPath(ipnsName)
-      const cidFetched = await fetchWithTimeout(`${ipfsApiUrl}/cat?arg=${encodeURIComponent(ipfsPath)}&length=${maxSize}`, {method: 'POST'})
-      const json = await cidFetched.json()
+      const cidFetched = await fetchTextWithTimeout(`${ipfsApiUrl}/cat?arg=${encodeURIComponent(ipfsPath)}&length=${maxSize}`, {method: 'POST'})
+      const json = JSON.parse(cidFetched.text)
       if (!isBitsocialJson(json)) {
         throw Error('not Bitsocial json')
       }
@@ -215,8 +215,7 @@ const startCachingAndRevalidatingIpns = async (ipnsName) => {
 // resolve an ipns name to the ipfs path its record points to, '<cid>' or '<cid>/path/inside/cid',
 // the gateway serves that whole path (plus the requested sub path), so validate the whole path
 const resolveIpnsPath = async (ipnsName) => {
-  const fetched = await fetchWithTimeout(`${ipfsApiUrl}/name/resolve?arg=${ipnsName}&nocache=true`, {method: 'POST'})
-  const text = await fetched.text()
+  const {text} = await fetchTextWithTimeout(`${ipfsApiUrl}/name/resolve?arg=${ipnsName}&nocache=true`, {method: 'POST'})
   let path
   try {
     path = JSON.parse(text).Path
@@ -232,7 +231,8 @@ const resolveIpnsPath = async (ipnsName) => {
 const isBitsocialJson = (json) => json?.signature || json?.comments || json?.allPostCount
 
 let maxTime = 180_000
-const fetchWithTimeout = async (url, options) => {
+// the timeout also covers reading the body, kubo can send the headers and then stall (e.g. a missing block)
+const fetchTextWithTimeout = async (url, options) => {
   const AbortController = globalThis.AbortController || await import('abort-controller')
 
   const controller = new AbortController()
@@ -244,7 +244,8 @@ const fetchWithTimeout = async (url, options) => {
 
   try {
     const response = await fetch(url, options)
-    return response
+    const text = await response.text()
+    return {status: response.status, statusText: response.statusText, text}
   } catch (e) {
     // native fetch rejects with an AbortError when the timeout aborts it
     if (e.name === 'AbortError') {
