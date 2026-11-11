@@ -96,4 +96,27 @@ describe('ipfs daemon', () => {
       await stopIpfsDaemon(ipfsProcess)
     }
   })
+
+  it('kills the daemon when a health check throws', async () => {
+    const healthChecks = [async () => {
+      throw Error('health check threw')
+    }]
+    // outside mocha, an unhandled rejection exits the whole provider process
+    const unhandledRejections = []
+    const onUnhandledRejection = (reason) => unhandledRejections.push(reason)
+    process.on('unhandledRejection', onUnhandledRejection)
+
+    const ipfsProcess = await startFakeIpfsDaemon([], {healthChecks, healthCheckIntervalMs: 20})
+    try {
+      if (!hasExited(ipfsProcess)) {
+        await Promise.race([once(ipfsProcess, 'exit'), sleep(1000)])
+      }
+      expect(unhandledRejections).to.deep.equal([])
+      expect(ipfsProcess.signalCode).to.equal('SIGTERM')
+    }
+    finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+      await stopIpfsDaemon(ipfsProcess)
+    }
+  })
 })

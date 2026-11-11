@@ -7,7 +7,7 @@ const ipfsProcesses = new Set()
 let exitHookRegistered = false
 
 // start the kubo daemon, resolves with the child process once the daemon is ready, rejects when it exits
-// healthChecks are async functions that return a failure message when the daemon must be killed,
+// healthChecks are async functions that return (or throw) a failure when the daemon must be killed,
 // they run from 'Daemon is ready' until the daemon exits
 // a daemon that isn't ready after startupTimeoutMs (e.g. hung in --migrate) is killed, so the caller can retry
 const startIpfsDaemon = ({binaryPath, args, env, healthChecks = [], healthCheckIntervalMs = 1000 * 60, startupTimeoutMs = 1000 * 60 * 5}) => new Promise((resolve, reject) => {
@@ -80,7 +80,8 @@ const startIpfsDaemon = ({binaryPath, args, env, healthChecks = [], healthCheckI
     }
     healthCheckInterval = setInterval(() => {
       for (const healthCheck of healthChecks) {
-        healthCheck().then((failure) => {
+        // a health check that throws failed, an unhandled rejection would exit the whole process
+        healthCheck().catch((e) => `ipfs health check threw '${e?.message || e}', killing ipfs...`).then((failure) => {
           if (failure && !exited) {
             console.log(failure)
             tryKill()
