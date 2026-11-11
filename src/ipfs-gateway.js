@@ -96,7 +96,9 @@ const proxyIpfsGateway = async (proxy, req, res) => {
     return
   }
 
-  let cid, ipnsName
+  // validate the path that gets proxied, without the query string, the gateway also serves files inside directories
+  const pathname = req.url.split('?')[0]
+  let cid, ipnsName, subPath
   if (subdomains[1] === 'ipfs' || subdomains[1] === 'ipns') {
     if (subdomains[1] === 'ipns') {
       ipnsName = subdomains[0]
@@ -104,18 +106,21 @@ const proxyIpfsGateway = async (proxy, req, res) => {
     else {
       cid = subdomains[0]
     }
+    subPath = pathname
     // host must match kubo Gateway.PublicGateways config
     rewriteHeaders.host = `${subdomains[0]}.${subdomains[1]}.localhost`
   }
   else {
-    const params = req.url.split('/')
+    const params = pathname.split('/')
     if (params[1] === 'ipns') {
       ipnsName = params[2]
     }
     else {
       cid = params[2]
     }
+    subPath = params.slice(3).join('/')
   }
+  subPath = subPath.replace(/^\/+|\/+$/g, '')
 
   if (ipnsName && ipnsCachingAndRevalidatingUntil[ipnsName] && !ipnsInvalid[ipnsName]) {
     debugGateway(req.method, req.headers.host, req.url, 'cached, skipping validation')
@@ -129,19 +134,10 @@ const proxyIpfsGateway = async (proxy, req, res) => {
 
   let fetched, text, error, json
   try {
-    if (ipnsName) {
-      const fetched = await fetchWithTimeout(`${ipfsApiUrl}/name/resolve?arg=${ipnsName}&nocache=true`, {method: 'POST'})
-      const text = await fetched.text()
-      try {
-        cid = JSON.parse(text).Path.split('/')[2]
-      }
-      catch (e) {
-        throw Error('failed resolving ipns name')
-      }
-    }
-
-    fetched = await fetchWithTimeout(`${ipfsApiUrl}/cat?arg=${cid}&length=${maxSize}`, {method: 'POST'})
-    text = await fetched.text()
+    const rootPath = ipnsName ? await resolveIpnsPath(ipnsName) : cid
+    const ipfsPath = subPath ? `${rootPath}/${decodeURIComponent(subPath)}` : rootPath
+    fetched = await fetchTextWithTimeout(`${ipfsApiUrl}/cat?arg=${encodeURIComponent(ipfsPath)}&length=${maxSize}`, {method: 'POST'})
+    text = fetched.text
     json = JSON.parse(text)
   }
   catch (e) {
@@ -158,15 +154,24 @@ const proxyIpfsGateway = async (proxy, req, res) => {
     return
   }
 
+  // check failed (e.g. ipns not resolved, path not found, directory), never proxy content that wasn't validated
+  if (!(fetched?.status < 300)) {
+    res.statusCode = fetched?.status >= 400 ? fetched.status : 502
+    res.end(`${bitsocialErrorMessage}: ${json?.Message || error?.message || fetched?.statusText}`)
+    return
+  }
+
   // status was succeeded, but doesn't have json.signature, so is not Bitsocial content
-  if (fetched?.status < 300 && !isBitsocialJson(json)) {
+  if (!isBitsocialJson(json)) {
     res.statusCode = 403
     res.end(bitsocialErrorMessage)
     return
   }
 
   // cache ipns and revalidate every revalidateSeconds
-  if (ipnsName && fetched?.status === 200) {
+  // only when the name's root was validated, the cache skips validation for every path of the name
+  // and its revalidation only checks the root
+  if (ipnsName && !subPath && fetched?.status === 200) {
     startCachingAndRevalidatingIpns(ipnsName)
   }
 
@@ -190,17 +195,9 @@ const startCachingAndRevalidatingIpns = async (ipnsName) => {
 
   while (ipnsCachingAndRevalidatingUntil[ipnsName] > Date.now()) {
     try {
-      const fetched = await fetchWithTimeout(`${ipfsApiUrl}/name/resolve?arg=${ipnsName}&nocache=true`, {method: 'POST'})
-      const text = await fetched.text()
-      let cid
-      try {
-        cid = JSON.parse(text).Path.split('/')[2]
-      }
-      catch (e) {
-        throw Error('failed resolving ipns name')
-      }
-      const cidFetched = await fetchWithTimeout(`${ipfsApiUrl}/cat?arg=${cid}&length=${maxSize}`, {method: 'POST'})
-      const json = await cidFetched.json()
+      const ipfsPath = await resolveIpnsPath(ipnsName)
+      const cidFetched = await fetchTextWithTimeout(`${ipfsApiUrl}/cat?arg=${encodeURIComponent(ipfsPath)}&length=${maxSize}`, {method: 'POST'})
+      const json = JSON.parse(cidFetched.text)
       if (!isBitsocialJson(json)) {
         throw Error('not Bitsocial json')
       }
@@ -215,11 +212,27 @@ const startCachingAndRevalidatingIpns = async (ipnsName) => {
   delete ipnsCachingAndRevalidatingUntil[ipnsName]
 }
 
+// resolve an ipns name to the ipfs path its record points to, '<cid>' or '<cid>/path/inside/cid',
+// the gateway serves that whole path (plus the requested sub path), so validate the whole path
+const resolveIpnsPath = async (ipnsName) => {
+  const {text} = await fetchTextWithTimeout(`${ipfsApiUrl}/name/resolve?arg=${ipnsName}&nocache=true`, {method: 'POST'})
+  let path
+  try {
+    path = JSON.parse(text).Path
+  }
+  catch (e) {}
+  if (typeof path !== 'string' || !path.startsWith('/ipfs/')) {
+    throw Error('failed resolving ipns name')
+  }
+  return path.slice('/ipfs/'.length).replace(/\/+$/, '')
+}
+
 // Bitsocial community JSON either has signature, comments, or allPostCount.
 const isBitsocialJson = (json) => json?.signature || json?.comments || json?.allPostCount
 
-const maxTime = 180_000
-const fetchWithTimeout = async (url, options) => {
+let maxTime = 180_000
+// the timeout also covers reading the body, kubo can send the headers and then stall (e.g. a missing block)
+const fetchTextWithTimeout = async (url, options) => {
   const AbortController = globalThis.AbortController || await import('abort-controller')
 
   const controller = new AbortController()
@@ -231,9 +244,11 @@ const fetchWithTimeout = async (url, options) => {
 
   try {
     const response = await fetch(url, options)
-    return response
+    const text = await response.text()
+    return {status: response.status, statusText: response.statusText, text}
   } catch (e) {
-    if (e.message === 'The user aborted a request.') {
+    // native fetch rejects with an AbortError when the timeout aborts it
+    if (e.name === 'AbortError') {
       throw Error('request timed out')
     }
     throw (e)
@@ -242,4 +257,12 @@ const fetchWithTimeout = async (url, options) => {
   }
 }
 
-module.exports = {proxyIpfsGateway, rewriteIpfsGatewaySubdomainsHost}
+module.exports = {
+  proxyIpfsGateway,
+  rewriteIpfsGatewaySubdomainsHost,
+  _private: {
+    setFetchTimeoutForTests: (ms) => {
+      maxTime = ms
+    }
+  }
+}

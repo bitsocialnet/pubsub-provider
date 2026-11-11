@@ -2,8 +2,8 @@ require('dotenv').config({quiet: true})
 const config = require('./config')
 const envHttpRouterUrls = process.env.HTTP_ROUTER_URLS ? process.env.HTTP_ROUTER_URLS.split(',').map(url => url.trim()) : []
 const Debug = require('debug')
-const debugIpfs = require('debug')(`${config.debugNamespace}:ipfs`)
-const {execSync, exec} = require('child_process')
+const {execSync} = require('child_process')
+const {startIpfsDaemon} = require('./ipfs-daemon')
 const path = require('path')
 const ipfsBinaryPath = path.join(__dirname, '..', 'bin', 'ipfs')
 const ipfsDataPath = config.ipfsDataPath
@@ -14,7 +14,6 @@ const ProgressBar = require('progress')
 const decompress = require('@xhmikosr/decompress').default
 const ipfsGatewayUseSubdomains = process.env.IPFS_GATEWAY_USE_SUBDOMAINS === 'true' || process.argv.includes('--ipfs-gateway-use-subdomains')
 const tcpPortUsed = require('tcp-port-used')
-const ps = require('process')
 
 const architecture = require('os').arch()
 let ipfsClientArchitecture
@@ -191,69 +190,36 @@ async function initIpfs() {
   }
 }
 
-const startIpfs = () => new Promise((resolve, reject) => {
-  const ipfsProcess = exec(`IPFS_PATH="${ipfsDataPath}" ${ipfsBinaryPath} daemon --migrate --enable-pubsub-experiment --enable-namesys-pubsub`)
-  console.log(`ipfs daemon process started with pid ${ipfsProcess.pid}`)
-  let lastError
-  ipfsProcess.stderr.on('data', (data) => {
-    lastError = data.toString()
-    console.error(data.toString())
-  })
-  ipfsProcess.stdin.on('data', debugIpfs)
-  ipfsProcess.stdout.on('data', (data) => {
-    data = data.toString()
-    debugIpfs(data)
-    if (data.includes('Daemon is ready')) {
-      resolve()
-    }
-  })
-  ipfsProcess.on('error', console.error)
-  ipfsProcess.on('exit', () => {
-    console.error(`ipfs process with pid ${ipfsProcess.pid} exited`)
-    reject(Error(lastError))
-  })
-  const tryKill = () => {
-    try {
-      ps.kill(ipfsProcess.pid)
-    } catch (e) {
-      console.log(e)
-    }
-    try {
-      // sometimes ipfs doesnt exit unless we kill pid +1
-      ps.kill(ipfsProcess.pid + 1)
-    } catch (e) {
-      console.log(e)
-    }
-  }
-  process.on('exit', () => {
-    tryKill()
-  })
-
+const ipfsHealthChecks = [
   // healthcheck on gateway, sometimes stops working and needs restart, dont know why
-  setInterval(async () => {
+  async () => {
     let res
     try {
       res = await fetch(`${config.ipfsGatewayOrigin}/ipfs/abc`).then(res => res.text())
     }
     catch (e) {}
     if (!res?.match('invalid cid')) {
-      console.log(`ipfs gateway healthcheck failed, response '${res}', killing ipfs...`)
-      tryKill()
+      return `ipfs gateway healthcheck failed, response '${res}', killing ipfs...`
     }
-  }, 1000 * 60)
-
+  },
   // healthcheck on kubo rpc, sometimes stops working and needs restart, dont know why
-  setInterval(async () => {
+  async () => {
     let res
     try {
       res = await fetch(`${config.ipfsApiBaseUrl}/config/show`, {method: 'POST'}).then(res => res.json())
     }
     catch (e) {}
     if (!res?.Identity) {
-      console.log(`kubo rpc healthcheck failed, response '${JSON.stringify(res)}', killing ipfs...`)
-      tryKill()
+      return `kubo rpc healthcheck failed, response '${JSON.stringify(res)}', killing ipfs...`
     }
-  }, 1000 * 60)
+  }
+]
+
+const startIpfs = () => startIpfsDaemon({
+  binaryPath: ipfsBinaryPath,
+  args: ['daemon', '--migrate', '--enable-pubsub-experiment', '--enable-namesys-pubsub'],
+  env,
+  healthChecks: ipfsHealthChecks
 })
 
 async function downloadIpfs() {
